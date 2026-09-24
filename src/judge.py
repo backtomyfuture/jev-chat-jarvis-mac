@@ -1,6 +1,6 @@
 """Judge backed by TypeSafe's Jev API.
 
-Pure remote judgment module: evaluates message intent and risk, and ranks reply candidates
+Pure remote judgment module: evaluates appeal, urgency, and reply strategy, and ranks reply candidates
 via TypeSafe Jev System One API over a persistent HTTP keep-alive connection pool.
 """
 
@@ -91,7 +91,7 @@ MULTI_STRATEGIES = {
     "礼貌回谢": "客气感谢对方支持",
 }
 
-# 微信日常研判 · 诉求 / 时效 / 建议 / 独立风险体系
+# 微信日常研判 · 诉求 / 时效 / 建议
 APPEALS = {
     "派活待办": "交办任务或推动具体事项落实",
     "催追进度": "催促尽快完成或追问进展节点",
@@ -116,79 +116,13 @@ STRATEGIES = {
     "先共情再探问": "先接住对方情绪给予倾听理解，再探问是否需要支持",
     "厘清事实与责任": "客观呈现数据与事实，厘清责任边界，避免情绪化推诿",
     "温和设限保留余地": "客观说明当前排期冲突或困难，协商可行替代方案",
-    "核验授权按流程办": "涉及权限、数据或合规时，严格走合规流程不私下越权",
-    "立即报警并保留证据": "遭受人身安全威胁时，保留所有聊天记录并立即报警求助",
-    "留存记录明确拒绝": "面对胁迫恐吓时，保留证据并拒绝不合理要求",
     "顺势承接礼貌回应": "自然友好回应，维持良好沟通氛围",
-}
-
-RISK_CATEGORIES = {
-    "人身安全": "涉及人身安全受威胁、暴力伤害、死亡恐吓、极端非法行为",
-    "胁迫与威胁": "涉及敲诈勒索、言语恐吓、强逼逼迫、职场霸凌",
-    "数据与隐私": "涉及客户名单、账号密码、隐私信息或商业机密",
-    "流程与合规": "涉及绕过审批、借用权限、私下操作违规事项",
-    "承诺与背书": "被要求口头做无法保障的兜底承诺或承担未定责任",
-    "资金与权益": "涉及借款、转账、垫付资金、合同结算或利益分配",
-    "权责不清": "责任界限模糊，可能被动兜底或承担非己职责",
-    "无明显风险": "常规工作沟通，不涉及上述边界风险",
-}
+    }
 
 
 def jev_configured() -> bool:
     """True when a TypeSafe key is present — callers prefer Jev over the local model."""
     return bool(userconfig.get("TYPESAFE_API_KEY", "JEV_API_KEY"))
-
-
-RISK_STRATEGY_MAP = {
-    "人身安全": "立即报警并保留证据",
-    "胁迫与威胁": "留存记录明确拒绝",
-    "数据与隐私": "核验授权按流程办",
-    "流程与合规": "核验授权按流程办",
-    "资金与权益": "核验授权按流程办",
-    "承诺与背书": "温和设限保留余地",
-    "权责不清": "厘清事实与责任",
-}
-
-
-def detect_objective_risk(text: str) -> tuple[bool, str, str, int]:
-    """严格基于客观证据识别风险，绝不从语气（催促、严肃）反推风险。
-
-    返回 (has_risk, category, warning, score)
-    """
-    # 0. 人身安全与暴力威胁（最高优先级）
-    if any(k in text for k in (
-        "弄死你", "弄死", "杀了你", "砍死", "打死你", "打死", "别想活", "要你的命", "同归于尽",
-        "小心你的命", "走着瞧弄死", "找人搞你", "废了你", "打断你的腿", "弄残", "去死吧", "收拾你"
-    )):
-        return True, "人身安全", "人身安全受威胁与暴力言论", 9
-
-    # 1. 胁迫与威胁
-    if any(k in text for k in (
-        "让你混不下去", "见不到钱就曝光", "不按我说的做就", "敢告我试试", "走着瞧", "有你好看的", "别怪我不客气", "逼你"
-    )):
-        return True, "胁迫与威胁", "遭遇言语胁迫与恐吓", 8
-
-    # 2. 数据与隐私
-    if any(k in text for k in ("私人邮箱", "客户名单", "客户资料", "私信发我", "导到我私", "发到私", "账号密码", "身份证", "验证码")):
-        return True, "数据与隐私", "涉及客户数据与私发风险", 8
-
-    # 3. 流程与合规
-    if any(k in text for k in ("权限明天再补", "权限后补", "绕过审批", "先斩后奏", "走私单", "别走系统", "先发我后面补流程", "私下操作")):
-        return True, "流程与合规", "涉及绕过流程与权限违规", 8
-
-    # 4. 资金与权益
-    if any(k in text for k in ("帮我垫付", "先转我", "私账", "转到我微信", "借点钱", "帮我充值", "无发票报销")):
-        return True, "资金与权益", "涉及私下资金与财产操作", 8
-
-    # 5. 承诺与背书
-    if any(k in text for k in ("你打包票", "必须绝对保证", "出事全归你", "出了问题你负责", "无论如何不能延期")):
-        return True, "承诺与背书", "涉及口头兜底承诺与连带责任", 6
-
-    # 6. 权责不清
-    if any(k in text for k in ("反正你看着办吧", "出了事找你", "这事你替我做")):
-        return True, "权责不清", "责任范围模糊待澄清", 5
-
-    return False, "无明显风险", "", 2
 
 
 def extract_urgency_heuristics(text: str) -> str:
@@ -220,11 +154,9 @@ def extract_appeal_heuristics(text: str) -> str:
 def format_judgment_summary(judg: dict | None) -> str:
     """Format structured judgment into a clean, actionable summary line.
 
-    If risk is present:
-        ⚠️ [风险类别/警示]  ·  建议: [应对建议]
-    Else if appeal is emotional response:
+    Emotional appeal:
         需要: [诉求]  ·  建议: [应对建议]
-    Else:
+    Otherwise:
         要你: [诉求]  ·  时效: [时效]  ·  建议: [应对建议]
     """
     if not judg or judg.get("status") == "pending":
@@ -232,20 +164,11 @@ def format_judgment_summary(judg: dict | None) -> str:
     if judg.get("error"):
         return f"研判异常: {judg.get('error')[:20]}"
 
-    risk = judg.get("risk") or {}
-    has_risk = risk.get("has_risk", False) or (
-        judg.get("danger", {}).get("score", 0) >= 7 and "无明显风险" not in str(risk.get("category", ""))
-    )
-
     strategy_choice = (
         (judg.get("strategy") or {}).get("choice")
         or (judg.get("action") or {}).get("choice")
         or "顺势承接礼貌回应"
     )
-
-    if has_risk:
-        warn = risk.get("warning") or risk.get("category") or "存在潜在风险"
-        return f"⚠️ {warn}  ·  建议: {strategy_choice}"
 
     appeal_choice = (
         (judg.get("appeal") or {}).get("choice")
@@ -391,43 +314,30 @@ class LocalJudge:
     def multi_judge(self, message: str, context: str | None = None) -> dict:
         if not message.strip():
             return {}
-        has_risk, cat, warn, score = detect_objective_risk(message)
-        rec_strat = RISK_STRATEGY_MAP.get(cat, "核验授权按流程办") if has_risk else ""
         h_urgency = extract_urgency_heuristics(message)
         h_appeal = extract_appeal_heuristics(message)
 
         appeal_choice = h_appeal or "核对确认"
         urgency_choice = h_urgency or "常规无催"
 
-        if has_risk:
-            risk_choice = cat
-            risk_warn = warn
-            risk_score = score
-            strategy_choice = rec_strat
+        if appeal_choice == "情绪回应":
+            strategy_choice = "先共情再探问"
+        elif appeal_choice == "派活待办":
+            strategy_choice = "确认范围并给节点"
+        elif appeal_choice == "催追进度":
+            strategy_choice = "直接给进展与结论"
+        elif appeal_choice == "要个说法":
+            strategy_choice = "厘清事实与责任"
         else:
-            risk_choice = "无明显风险"
-            risk_warn = ""
-            risk_score = 2
-            if appeal_choice == "情绪回应":
-                strategy_choice = "先共情再探问"
-            elif appeal_choice == "派活待办":
-                strategy_choice = "确认范围并给节点"
-            elif appeal_choice == "催追进度":
-                strategy_choice = "直接给进展与结论"
-            elif appeal_choice == "要个说法":
-                strategy_choice = "厘清事实与责任"
-            else:
-                strategy_choice = "顺势承接礼貌回应"
+            strategy_choice = "顺势承接礼貌回应"
 
         evidence = []
-        if has_risk:
-            evidence.append(f"触发客观风险特征 -> {risk_choice}")
         if urgency_choice != "常规无催":
             evidence.append(f"提取到时效词 -> {urgency_choice}")
         if h_appeal:
             evidence.append(f"提取到诉求模式 -> {h_appeal}")
 
-        conf = 0.88 if (h_appeal or has_risk or urgency_choice != "常规无催") else 0.52
+        conf = 0.88 if (h_appeal or urgency_choice != "常规无催") else 0.52
         alternatives = []
         if conf < 0.60:
             alternatives.append("语义较为简短，需结合前文上下文确认")
@@ -438,7 +348,6 @@ class LocalJudge:
             "appeal": {"choice": appeal_choice},
             "urgency": {"choice": urgency_choice},
             "strategy": {"choice": strategy_choice},
-            "risk": {"has_risk": has_risk, "category": risk_choice, "warning": risk_warn, "score": risk_score},
         })
 
         return {
@@ -457,24 +366,15 @@ class LocalJudge:
                 "tip": STRATEGIES.get(strategy_choice, ""),
                 "probabilities": {strategy_choice: conf},
             },
-            "risk": {
-                "has_risk": has_risk,
-                "category": risk_choice,
-                "warning": risk_warn,
-                "tip": RISK_CATEGORIES.get(risk_choice, ""),
-                "score": risk_score,
-            },
             "confidence": conf,
             "evidence": evidence,
             "alternatives": alternatives,
             "intent": old_intent,
             "intent_probs": {old_intent: conf},
-            "risk_probs": {},
             "actions": ACTION_MAP.get(old_intent, [strategy_choice]),
-            "danger": {"score": risk_score},
             "emotion": {
-                "choice": "就事论事" if not has_risk else "高度警惕",
-                "tip": "客观沟通" if not has_risk else "触发客观风险预警",
+                "choice": "就事论事",
+                "tip": "客观沟通",
             },
             "action": {
                 "choice": strategy_choice,
@@ -493,7 +393,7 @@ class LocalJudge:
 
 
 class Judge:
-    """Remote Jev Judge providing intent, risk evaluation, and candidate ranking."""
+    """Remote Jev Judge providing appeal, urgency, strategy, and candidate ranking."""
 
     name = "jev-api"
 
@@ -532,13 +432,9 @@ class Judge:
         return self.multi_judge(message, context=context)
 
     def multi_judge(self, message: str, context: str | None = None) -> dict:
-        """Evaluate a chat message across 4 core dimensions (Appeal, Urgency, Strategy, Risk).
-        
-        Strict rules:
-        1. No mind-reading: objective task/relational cues, no psychologizing.
-        2. Risk is independent: never infer danger from urgent or serious tone.
-        3. Actionable guidance: appeal + urgency + strategy, risk highlighted only when triggered.
-        4. Absolute priority on personal safety and threats.
+        """Evaluate a personal chat on appeal, urgency, and reply strategy.
+
+        Private assistant only. Do not classify safety, compliance, money, or harm.
         """
         if not message.strip():
             return {}
@@ -548,8 +444,6 @@ class Judge:
         if cache_key in self._multi_cache:
             return self._multi_cache[cache_key]
 
-        rule_has_risk, rule_cat, rule_warn, rule_score = detect_objective_risk(message)
-        rule_strat = RISK_STRATEGY_MAP.get(rule_cat, "核验授权按流程办") if rule_has_risk else ""
         h_urgency = extract_urgency_heuristics(message)
         h_appeal = extract_appeal_heuristics(message)
 
@@ -559,7 +453,8 @@ class Judge:
                 f"{context}\n\n"
                 f"【对方当前最新消息】：\n"
                 f"{message}\n\n"
-                f"请务必结合上述完整多轮对话语境，客观研判对方此消息的诉求、时效压力、我方应对建议以及是否存在客观边界风险（隐私/合规/资金/承诺/人身威胁）。"
+                f"请结合上述完整多轮对话语境，研判对方此消息的诉求、时效压力，以及我方怎么回更得体。"
+                f"不要做安全、合规、资金或人身威胁分类。"
             )
         else:
             state = f"【对方当前最新消息】：\n{message}"
@@ -570,7 +465,7 @@ class Judge:
             "questions": {
                 "appeal": {
                     "type": "choice",
-                    "instructions": "对方发送此消息的核心真实诉求最符合哪项？",
+                    "instructions": "对方发送此消息的核心诉求最符合哪项？",
                     "criteria": APPEALS,
                 },
                 "urgency": {
@@ -583,11 +478,6 @@ class Judge:
                     "instructions": "结合当前语境，我方最得体有效的应对建议是？",
                     "criteria": STRATEGIES,
                 },
-                "risk": {
-                    "type": "choice",
-                    "instructions": "该消息是否存在人身安全、胁迫恐吓、隐私数据、绕流程违规、资金或口头兜底承诺风险？（请严格基于客观事实，催促或严肃不构成合规/隐私风险）",
-                    "criteria": RISK_CATEGORIES,
-                },
             },
         }
 
@@ -598,38 +488,12 @@ class Judge:
             appeal_ans = ans.get("appeal") or {}
             urgency_ans = ans.get("urgency") or {}
             strategy_ans = ans.get("strategy") or {}
-            risk_ans = ans.get("risk") or {}
 
             appeal_choice = appeal_ans.get("choice") or h_appeal or "核对确认"
             urgency_choice = urgency_ans.get("choice") or h_urgency or "常规无催"
             strategy_choice = strategy_ans.get("choice") or "顺势承接礼貌回应"
-            risk_choice = risk_ans.get("choice") or "无明显风险"
 
-            # 规则与模型双重保障：客观风险独立判定
-            if rule_has_risk:
-                has_risk = True
-                risk_choice = rule_cat
-                risk_warn = rule_warn
-                risk_score = rule_score
-                strategy_choice = rule_strat or "核验授权按流程办"
-            elif risk_choice != "无明显风险" and risk_choice in RISK_CATEGORIES:
-                has_risk = True
-                risk_score = 9 if risk_choice == "人身安全" else (8 if risk_choice in ("数据与隐私", "流程与合规", "资金与权益", "胁迫与威胁") else 6)
-                risk_warn = f"涉及{risk_choice}风险"
-                if risk_choice == "人身安全":
-                    strategy_choice = "立即报警并保留证据"
-                elif risk_choice == "胁迫与威胁":
-                    strategy_choice = "留存记录明确拒绝"
-                elif strategy_choice in ("顺势承接礼貌回应", "先共情再探问"):
-                    strategy_choice = "核验授权按流程办"
-            else:
-                has_risk = False
-                risk_choice = "无明显风险"
-                risk_warn = ""
-                risk_score = 2
-
-            # 针对情绪倾诉的针对性调整
-            if appeal_choice == "情绪回应" and not has_risk:
+            if appeal_choice == "情绪回应":
                 if strategy_choice not in ("先共情再探问", "顺势承接礼貌回应"):
                     strategy_choice = "先共情再探问"
 
@@ -638,8 +502,6 @@ class Judge:
 
             evidence = []
             alternatives = []
-            if rule_has_risk:
-                evidence.append(f"直接风险证据：命中「{rule_cat}」关键词特征")
             if h_urgency != "常规无催":
                 evidence.append(f"时间线索：{h_urgency}")
             if confidence < 0.55:
@@ -648,7 +510,6 @@ class Judge:
             appeal_tip = APPEALS.get(appeal_choice, "")
             urgency_tip = URGENCIES.get(urgency_choice, "")
             strategy_tip = STRATEGIES.get(strategy_choice, "")
-            risk_tip = RISK_CATEGORIES.get(risk_choice, "")
 
             old_intent = map_appeal_to_intent(appeal_choice, message)
 
@@ -656,7 +517,6 @@ class Judge:
                 "appeal": {"choice": appeal_choice},
                 "urgency": {"choice": urgency_choice},
                 "strategy": {"choice": strategy_choice},
-                "risk": {"has_risk": has_risk, "category": risk_choice, "warning": risk_warn, "score": risk_score},
             })
 
             result = {
@@ -675,33 +535,22 @@ class Judge:
                     "tip": strategy_tip,
                     "probabilities": strategy_ans.get("probabilities") or {},
                 },
-                "risk": {
-                    "has_risk": has_risk,
-                    "category": risk_choice,
-                    "warning": risk_warn,
-                    "tip": risk_tip,
-                    "score": risk_score,
-                },
                 "confidence": confidence,
                 "evidence": evidence,
                 "alternatives": alternatives,
                 # Backward-compatibility aliases
                 "intent": old_intent,
                 "intent_probs": {old_intent: confidence},
-                "risk_probs": {},
                 "actions": ACTION_MAP.get(old_intent, [strategy_choice]),
                 "emotion": {
-                    "choice": "就事论事" if not has_risk else "高度警惕",
-                    "tip": "客观沟通" if not has_risk else "客观风险警示",
+                    "choice": "就事论事",
+                    "tip": "客观沟通",
                     "probabilities": {},
                 },
                 "action": {
                     "choice": strategy_choice,
                     "tip": strategy_tip,
                     "probabilities": strategy_ans.get("probabilities") or {},
-                },
-                "danger": {
-                    "score": risk_score,
                 },
                 "summary": summary_text,
                 "message": message,

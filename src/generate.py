@@ -44,7 +44,7 @@ DEFAULT_MODEL = "glm-4-flash"
 DEFAULT_BASE = "https://open.bigmodel.cn/api/anthropic"
 DEFAULT_OPENAI_BASE = "https://api.openai.com/v1"
 DEFAULT_ANTHROPIC_BASE = "https://api.anthropic.com"
-MISSING_HINT = ("未配置生成层 Key：候选回复需要它，判断/风险不需要。"
+MISSING_HINT = ("未配置生成层 Key：候选回复需要它，判断不需要。"
                 "设置 OPENAI_API_KEY（或 ANTHROPIC_API_KEY）后重启，见 README 配置章节。")
 # 用的是随包分发的凭据时报这个来源名，日志/--check 里能一眼分清「内置」和「你自己配的」
 BUILTIN_SOURCE = "内置默认"
@@ -151,7 +151,7 @@ THINKING_ONLY_HINT = ("思考型 {model}：额度被思考耗尽，正文 0 条�
 PROMPT_ONE = """刚收到一条微信消息，你要帮我回。
 
 {context_line}消息：「{message}」
-{intent_line}{strategy_line}{risk_line}
+{intent_line}{strategy_line}
 请写 {n} 条回复候选，语气统一成下面这一种，但两条的胆量要有差别：
 「{tone}」{instruction}
 
@@ -526,8 +526,7 @@ class Generator:
     def _one_tone(self, message: str, intent: str, tone: str,
                   context: str | None = None,
                   on_line=None,
-                  strategy: str = "",
-                  risk_warning: str = "") -> tuple[list[str], str]:
+                  strategy: str = "") -> tuple[list[str], str]:
         """One request for one tone. Returns (texts, error); never raises.
 
         With `on_line`, each finished line is handed over the moment it completes so the
@@ -539,11 +538,9 @@ class Generator:
         context_line = f"最近的对话：\n{context}\n\n" if context else ""
         intent_line = f"核心诉求：{intent}\n" if intent else ""
         strategy_line = f"应对建议：{strategy}\n" if strategy else ""
-        risk_line = f"⚠️ 避坑防范：{risk_warning}\n" if risk_warning else ""
         prompt = PROMPT_ONE.format(message=message, context_line=context_line,
                                    intent_line=intent_line,
                                    strategy_line=strategy_line,
-                                   risk_line=risk_line,
                                    n=styles.PER_TONE, tone=tone,
                                    instruction=styles.PRESETS[tone])
         emitted = 0
@@ -584,8 +581,7 @@ class Generator:
                  slot_tones: list[str] | None = None,
                  context: str | None = None,
                  on_candidate=None,
-                 strategy: str = "",
-                 risk_warning: str = "") -> dict:
+                 strategy: str = "") -> dict:
         """One concurrent request per selected 话术; returns the candidates grouped by tone.
 
         A tone gets its own request rather than one request listing every tone: asking a
@@ -616,8 +612,7 @@ class Generator:
                 on_candidate(i, tone, text)
             return self._one_tone(message, intent, tone, context,
                                   on_line if on_candidate is not None else None,
-                                  strategy=strategy,
-                                  risk_warning=risk_warning)
+                                  strategy=strategy)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(active)) as ex:
             futures = {i: ex.submit(run, i, tone) for i, tone in active}

@@ -251,14 +251,14 @@ class WeChatCliAdapter:
         finally:
             self._cli_lock.release()
 
-    def get_history(self, chat_name: str, limit: int = 15, max_age: float = 0.5) -> tuple[list[Message], bool]:
-        """Fetch recent messages for a conversation (supports both history and latest formats)."""
+    def get_history(self, chat_name: str, limit: int = 25, offset: int = 0, max_age: float = 0.5) -> tuple[list[Message], bool]:
+        """Fetch recent or paginated historical messages for a conversation."""
         if not chat_name:
             return [], False
         now = time.monotonic()
-        cached = self._history_cache.get(chat_name)
+        cache_key = f"{chat_name}__offset_{offset}__limit_{limit}" if offset > 0 else chat_name
+        cached = self._history_cache.get(cache_key)
         if cached and (now - cached[0] < max_age):
-            # Check cached shape
             if len(cached) == 5:
                 return cached[2], cached[3]
             return cached[1], cached[2]
@@ -267,7 +267,7 @@ class WeChatCliAdapter:
                 return (cached[2], cached[3]) if len(cached) == 5 else (cached[1], cached[2])
             return [], False
         try:
-            cmd = [self.cli_path, "history", chat_name, "--limit", str(limit)]
+            cmd = [self.cli_path, "history", chat_name, "--limit", str(limit), "--offset", str(offset), "--format", "json"]
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             if res.returncode != 0:
                 if cached:
@@ -302,7 +302,7 @@ class WeChatCliAdapter:
                     lines=[text],
                 ))
                 y_coord += 0.05
-            self._history_cache[chat_name] = (now, messages, is_group)
+            self._history_cache[cache_key] = (now, messages, is_group)
             return messages, is_group
         except Exception:
             if cached:
@@ -315,10 +315,16 @@ class WeChatCliAdapter:
 _GLOBAL_ADAPTER = WeChatCliAdapter()
 
 
+def fetch_older_history_via_cli(chat_name: str, offset: int, limit: int = 20) -> list[Message]:
+    """Fetch older historical messages for paging backwards in time."""
+    msgs, _ = _GLOBAL_ADAPTER.get_history(chat_name, limit=limit, offset=offset)
+    return msgs
+
+
 def read_conversation_via_cli(
     target_chat: str | None = None,
     prev_key: tuple[str, Any] | None = None,
-    max_messages: int = 15,
+    max_messages: int = 25,
 ) -> dict[str, Any]:
     """Drop-in deep replacement for perception.read_conversation.
 

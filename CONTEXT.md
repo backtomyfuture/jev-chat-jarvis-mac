@@ -13,7 +13,7 @@ The seam at which chat acquisition happens.
 - **Chat Snapshot**: The immutable data contract produced by `ChatSource`, containing the chat identifier, recipient name, is_group flag, and an ordered list of recent structured messages with explicit sender roles.
 
 ### Judgment
-The decision module evaluating a target message in context. Backed by **TypeSafe Jev** (remote API), it returns structured probabilities across 8 canonical workplace intents, a 0–9 risk score, calibrated confidence, and recommended action guidelines.
+The decision module evaluating a target message in context. Backed by **TypeSafe Jev** (remote API), it returns appeal, urgency, and a reply strategy, plus calibrated confidence. Personal chat assistance only — it does not classify safety, compliance, money, or harm.
 
 ### Response Formulation
 The module responsible for generating tone-specific candidate replies (via OpenAI or Anthropic compatible remote LLMs) and ranking candidates against the detected intent.

@@ -238,11 +238,19 @@ class HudController(NSObject):
         self._fingerprint = None    # last chat-pane fingerprint; equal ⇒ skip OCR entirely
         self._last_full = None      # last OCR'd result, reused while the pane is unchanged
         self._selected_target_chat = None
+        self._current_chat = None
         self._cli_prev_key = None
         self._session_popup = None
         self._last_sessions_fetch = 0.0
         self._chat_messages = []
         self._chat_judgments = {}
+        self._history_offset = 0
+        self._history_loading = False
+        self._has_more_history = True
+        self._judgment_lock = threading.Lock()
+        self._judgment_queue = []
+        self._judgment_workers_running = False
+        self._max_judgment_workers = 3
         self._last_rendered_signature = None
         self._timeline_req = None
         self._timeline_running = False
@@ -391,6 +399,12 @@ class HudController(NSObject):
         self._chat_scroll.setDocumentView_(self._chat_doc)
         view.addSubview_(self._chat_scroll)
 
+        # 开启滚动检测以支持向上滑动无缝拉取更早历史
+        self._chat_scroll.contentView().setPostsBoundsChangedNotifications_(True)
+        AppKit.NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+            self, "scrollViewDidScroll:",
+            AppKit.NSViewBoundsDidChangeNotification, self._chat_scroll.contentView())
+
         # 保持与历史接口及测试的兼容
         self._message_surface = divider
         self._message_scroll = self._chat_scroll
@@ -464,53 +478,41 @@ class HudController(NSObject):
             }, NSMakeRange(0, len(err_text)))
             return mattr
 
-        risk = judg.get("risk") or {}
-        has_risk = risk.get("has_risk", False) or (
-            judg.get("danger", {}).get("score", 0) >= 7 and "无明显风险" not in str(risk.get("category", ""))
-        )
-
         strategy_choice = (
             (judg.get("strategy") or {}).get("choice")
             or (judg.get("action") or {}).get("choice")
             or "顺势承接礼貌回应"
         )
 
-        if has_risk:
-            warn = risk.get("warning") or risk.get("category") or "存在潜在风险"
+        appeal_choice = (
+            (judg.get("appeal") or {}).get("choice")
+            or (judg.get("intent") or {}).get("choice")
+            or "随性闲聊"
+        )
+        urgency_choice = (
+            (judg.get("urgency") or {}).get("choice")
+            or "常规无催"
+        )
+
+        # 兼容只有旧版 3 栏数据的情况 (诉求, 态度, 策略)
+        if "urgency" not in judg and "emotion" in judg and "appeal" not in judg:
+            emotion_choice = (judg.get("emotion") or {}).get("choice") or "平静客观"
             parts = [
-                ("⚠️ ", warn, "risk"),
+                ("诉求: ", appeal_choice, "intent"),
+                ("   态度: ", emotion_choice, "emotion"),
+                ("   策略: ", strategy_choice, "strategy"),
+            ]
+        elif appeal_choice in ("情绪回应", "求安慰"):
+            parts = [
+                ("需要: ", appeal_choice, "appeal"),
                 ("   建议: ", strategy_choice, "strategy"),
             ]
         else:
-            appeal_choice = (
-                (judg.get("appeal") or {}).get("choice")
-                or (judg.get("intent") or {}).get("choice")
-                or "随性闲聊"
-            )
-            urgency_choice = (
-                (judg.get("urgency") or {}).get("choice")
-                or "常规无催"
-            )
-
-            # 兼容只有旧版 3 栏数据的情况 (诉求, 态度, 策略)
-            if "urgency" not in judg and "emotion" in judg and "appeal" not in judg:
-                emotion_choice = (judg.get("emotion") or {}).get("choice") or "平静客观"
-                parts = [
-                    ("诉求: ", appeal_choice, "intent"),
-                    ("   态度: ", emotion_choice, "emotion"),
-                    ("   策略: ", strategy_choice, "strategy"),
-                ]
-            elif appeal_choice in ("情绪回应", "求安慰"):
-                parts = [
-                    ("需要: ", appeal_choice, "appeal"),
-                    ("   建议: ", strategy_choice, "strategy"),
-                ]
-            else:
-                parts = [
-                    ("要你: ", appeal_choice, "appeal"),
-                    ("   时效: ", urgency_choice, "urgency"),
-                    ("   建议: ", strategy_choice, "strategy"),
-                ]
+            parts = [
+                ("要你: ", appeal_choice, "appeal"),
+                ("   时效: ", urgency_choice, "urgency"),
+                ("   建议: ", strategy_choice, "strategy"),
+            ]
 
         full_text = "".join(label + val for label, val, _ in parts)
         mattr = NSMutableAttributedString.alloc().initWithString_(full_text)
@@ -527,9 +529,7 @@ class HudController(NSObject):
             }, NSMakeRange(pos, len_l))
 
             # 核心值：半粗体高亮配色
-            if kind == "risk":
-                c_color = PALETTE["red"]
-            elif kind in ("appeal", "intent"):
+            if kind in ("appeal", "intent"):
                 c_color = PALETTE["accent"]
             elif kind == "urgency":
                 c_color = PALETTE["amber"] if ("急" in val or "今日" in val or "节点" in val) else PALETTE["text"]
@@ -554,19 +554,86 @@ class HudController(NSObject):
 
         return mattr
 
+    def scrollViewDidScroll_(self, notification):
+        if getattr(self, "_history_loading", False) or not getattr(self, "_has_more_history", True):
+            return
+        clip_view = self._chat_scroll.contentView()
+        cur_y = clip_view.bounds().origin.y
+        if cur_y <= 30 and getattr(self, "_current_chat", None):
+            self._trigger_load_older_history()
+
+    def loadMoreHistoryClicked_(self, sender):
+        if not getattr(self, "_history_loading", False) and getattr(self, "_has_more_history", True):
+            self._trigger_load_older_history()
+
     @objc.python_method
-    def _render_timeline(self):
+    def _trigger_load_older_history(self):
+        if getattr(self, "_history_loading", False) or not getattr(self, "_has_more_history", True):
+            return
+        chat_name = getattr(self, "_current_chat", None)
+        if not chat_name:
+            return
+        self._history_loading = True
+        self._render_timeline()
+        offset = max(len(self._chat_messages), self._history_offset)
+        epoch = self._reply_epoch
+
+        def load_task():
+            try:
+                from chat_source import fetch_older_history_via_cli
+                older = fetch_older_history_via_cli(chat_name, offset=offset, limit=20)
+                self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "applyOlderHistory:", (epoch, chat_name, older, offset + len(older)), False
+                )
+            except Exception as e:
+                self._history_loading = False
+                _log(f"加载更早历史失败: {e}")
+
+        threading.Thread(target=load_task, daemon=True).start()
+
+    def applyOlderHistory_(self, payload):
+        epoch, chat_name, older, next_offset = payload
+        self._history_loading = False
+        if epoch != self._reply_epoch or chat_name != getattr(self, "_current_chat", None):
+            return
+        if not older:
+            self._has_more_history = False
+            self._render_timeline()
+            return
+
+        self._history_offset = next_offset
+
+        existing_sigs = {(m.side, m.text.strip(), getattr(m, "sender", "")) for m in self._chat_messages}
+        new_older = [m for m in older if (m.side, m.text.strip(), getattr(m, "sender", "")) not in existing_sigs]
+        if not new_older:
+            self._has_more_history = False
+            self._render_timeline()
+            return
+
+        old_doc_h = self._chat_doc.frame().size.height
+        old_scroll_y = self._chat_scroll.contentView().bounds().origin.y
+
+        self._chat_messages = new_older + self._chat_messages
+        self._render_timeline(preserve_scroll=(old_doc_h, old_scroll_y))
+        self._dispatch_judgments_for_messages(new_older)
+
+    @objc.python_method
+    def _render_timeline(self, scroll_to_bottom=False, preserve_scroll=None):
         if not hasattr(self, "_chat_doc") or self._chat_doc is None:
             return
         msgs = getattr(self, "_chat_messages", [])
         judgments = getattr(self, "_chat_judgments", {})
+        has_more = getattr(self, "_has_more_history", True)
+        is_loading = getattr(self, "_history_loading", False)
         
         sig = (
             len(msgs),
+            has_more,
+            is_loading,
             tuple((getattr(m, "side", ""), getattr(m, "text", ""), getattr(m, "sender", "")) for m in msgs),
             tuple((k, bool(v and not v.get("status") == "pending")) for k, v in judgments.items())
         )
-        if sig == getattr(self, "_last_rendered_signature", None):
+        if sig == getattr(self, "_last_rendered_signature", None) and not scroll_to_bottom and not preserve_scroll:
             return
         self._last_rendered_signature = sig
 
@@ -579,8 +646,23 @@ class HudController(NSObject):
         max_bubble_w = 260.0
         options = (AppKit.NSStringDrawingUsesLineFragmentOrigin | AppKit.NSStringDrawingUsesFontLeading)
 
-        thems = [m for m in msgs if getattr(m, "side", "") == "them" and getattr(m, "text", "")]
-        latest_them_msg = thems[-1] if thems else None
+        # 顶部历史加载按钮/指示条
+        top_bar_h = 24.0
+        if getattr(self, "_current_chat", None):
+            if has_more:
+                top_btn = NSButton.alloc().initWithFrame_(NSMakeRect(20, cur_y, cw - 40, top_bar_h))
+                btn_title = "⏳ 正在加载更早历史…" if is_loading else "↑ 向上滑动或点击加载更早历史"
+                top_btn.setTitle_(btn_title)
+                ui_style.style_button(top_btn, font_size=11, radius=6)
+                top_btn.setTarget_(self)
+                top_btn.setAction_("loadMoreHistoryClicked:")
+                top_btn.setEnabled_(not is_loading)
+                self._chat_doc.addSubview_(top_btn)
+            else:
+                top_lbl = ui_style.make_label("— 已加载全部聊天记录 —", 20, cur_y, cw - 40, top_bar_h, size=11, color=PALETTE["muted"])
+                top_lbl.setAlignment_(AppKit.NSTextAlignmentCenter)
+                self._chat_doc.addSubview_(top_lbl)
+            cur_y += top_bar_h + 10.0
 
         for m in msgs:
             text = (getattr(m, "text", "") or "").strip()
@@ -625,101 +707,147 @@ class HudController(NSObject):
                 bg.addSubview_(tf)
                 self._chat_doc.addSubview_(bg)
 
-                # 仅对对方最新的一条消息展示研判微卡片，历史消息保持清爽纯净的气泡形态
-                if m is latest_them_msg:
-                    cur_y += bubble_h + 4
+                # 每一条对方消息下方都展示 Jev 研判微卡片
+                cur_y += bubble_h + 4
 
-                    judg = judgments.get(text)
-                    card_attr = self._build_card_attr(judg)
-                    card_b = card_attr.boundingRectWithSize_options_(NSMakeSize(10000, 100), options)
-                    text_actual_w = float(int(card_b.size.width + 6.999))
-                    card_w = min(cw - 16, max(text_actual_w + 16, 210))
-                    card_h = 24.0
+                judg = judgments.get(text)
+                card_attr = self._build_card_attr(judg)
+                card_b = card_attr.boundingRectWithSize_options_(NSMakeSize(10000, 100), options)
+                text_actual_w = float(int(card_b.size.width + 6.999))
+                card_w = min(cw - 16, max(text_actual_w + 16, 210))
+                card_h = 24.0
 
-                    card_bg = ui_style.make_surface(5, NSColor.colorWithWhite_alpha_(0.96, 0.98),
-                                                    border=NSColor.colorWithWhite_alpha_(0.88, 1.0))
-                    card_bg.setFrame_(NSMakeRect(8, cur_y, card_w, card_h))
+                card_bg = ui_style.make_surface(5, NSColor.colorWithWhite_alpha_(0.96, 0.98),
+                                                border=NSColor.colorWithWhite_alpha_(0.88, 1.0))
+                card_bg.setFrame_(NSMakeRect(8, cur_y, card_w, card_h))
 
-                    tip_parts = []
-                    if judg and not judg.get("status") == "pending" and not judg.get("error"):
-                        a_c = (judg.get("appeal") or judg.get("intent") or {}).get("choice") or ""
-                        a_t = (judg.get("appeal") or {}).get("tip") or (judg.get("intent") or {}).get("tip") or ""
-                        if a_c: tip_parts.append(f"诉求【{a_c}】: {a_t}")
-                        u_c = (judg.get("urgency") or {}).get("choice") or ""
-                        u_t = (judg.get("urgency") or {}).get("tip") or ""
-                        if u_c: tip_parts.append(f"时效【{u_c}】: {u_t}")
-                        s_c = (judg.get("strategy") or judg.get("action") or {}).get("choice") or ""
-                        s_t = (judg.get("strategy") or judg.get("action") or {}).get("tip") or ""
-                        if s_c: tip_parts.append(f"建议【{s_c}】: {s_t}")
-                        r_obj = judg.get("risk") or {}
-                        if r_obj.get("has_risk"):
-                            r_c = r_obj.get("category") or ""
-                            r_w = r_obj.get("warning") or ""
-                            tip_parts.append(f"⚠️ 风险【{r_c}】: {r_w}")
-                    card_bg.setToolTip_("\n".join(tip_parts) if tip_parts else "Jev 微信消息研判")
+                tip_parts = []
+                if judg and not judg.get("status") == "pending" and not judg.get("error"):
+                    a_c = (judg.get("appeal") or judg.get("intent") or {}).get("choice") or ""
+                    a_t = (judg.get("appeal") or {}).get("tip") or (judg.get("intent") or {}).get("tip") or ""
+                    if a_c: tip_parts.append(f"诉求【{a_c}】: {a_t}")
+                    u_c = (judg.get("urgency") or {}).get("choice") or ""
+                    u_t = (judg.get("urgency") or {}).get("tip") or ""
+                    if u_c: tip_parts.append(f"时效【{u_c}】: {u_t}")
+                    s_c = (judg.get("strategy") or judg.get("action") or {}).get("choice") or ""
+                    s_t = (judg.get("strategy") or judg.get("action") or {}).get("tip") or ""
+                    if s_c: tip_parts.append(f"建议【{s_c}】: {s_t}")
+                card_bg.setToolTip_("\n".join(tip_parts) if tip_parts else "Jev 微信消息研判")
 
-                    card_tf = ui_style.make_label("", 8, 4, card_w - 16, 16.0, selectable=True)
-                    card_tf.cell().setWraps_(False)
-                    card_tf.cell().setLineBreakMode_(AppKit.NSLineBreakByClipping)
-                    card_tf.setAttributedStringValue_(card_attr)
-                    card_bg.addSubview_(card_tf)
-                    self._chat_doc.addSubview_(card_bg)
+                card_tf = ui_style.make_label("", 8, 4, card_w - 16, 16.0, selectable=True)
+                card_tf.cell().setWraps_(False)
+                card_tf.cell().setLineBreakMode_(AppKit.NSLineBreakByClipping)
+                card_tf.setAttributedStringValue_(card_attr)
+                card_bg.addSubview_(card_tf)
+                self._chat_doc.addSubview_(card_bg)
 
-                    cur_y += card_h + 10
-                else:
-                    cur_y += bubble_h + 8
-            else:
-                pass
+                cur_y += card_h + 10
 
         content_h = max(cur_y + 16, self._chat_scroll.contentView().frame().size.height)
         self._chat_doc.setFrameSize_(NSMakeSize(cw, content_h))
         
         scroll_v = self._chat_scroll.contentView()
         scroll_h = scroll_v.frame().size.height
-        if content_h > scroll_h:
-            scroll_v.scrollPoint_(AppKit.NSMakePoint(0, content_h - scroll_h))
+        if preserve_scroll:
+            old_doc_h, old_scroll_y = preserve_scroll
+            delta_h = content_h - old_doc_h
+            new_scroll_y = max(0.0, old_scroll_y + delta_h)
+            scroll_v.scrollPoint_(AppKit.NSMakePoint(0, new_scroll_y))
+        elif scroll_to_bottom:
+            if content_h > scroll_h:
+                scroll_v.scrollPoint_(AppKit.NSMakePoint(0, content_h - scroll_h))
 
     def applyTimelineMessages_(self, msgs):
-        self._chat_messages = msgs
-        self._render_timeline()
-        thems = [m for m in msgs if getattr(m, "side", "") == "them" and getattr(m, "text", "")]
-        target_m = thems[-1] if thems else None
-        if not target_m:
+        incoming_chat = getattr(self, "_chat_title", None) or getattr(self, "_selected_target_chat", None)
+        if incoming_chat and incoming_chat != getattr(self, "_current_chat", None):
+            self._current_chat = incoming_chat
+            self._chat_messages = msgs
+            self._history_offset = len(msgs)
+            self._has_more_history = True
+            self._chat_judgments.clear()
+            self._render_timeline(scroll_to_bottom=True)
+            self._dispatch_judgments_for_messages(msgs)
             return
-        text = target_m.text
-        if text in self._chat_judgments:
+
+        if not self._chat_messages:
+            self._chat_messages = msgs
+            self._history_offset = max(len(msgs), getattr(self, "_history_offset", 0))
+            self._render_timeline(scroll_to_bottom=True)
+            self._dispatch_judgments_for_messages(msgs)
             return
-        # 若主链刚完成同条文本研判，直接复用其 verdict 避免重复网络开销
-        if getattr(self, "analyzed_text", None) == text and getattr(self, "_last_verdict", None):
-            self._chat_judgments[text] = self._last_verdict
-            self._render_timeline()
+
+        existing_sigs = {(m.side, m.text.strip(), getattr(m, "sender", "")) for m in self._chat_messages}
+        new_additions = [m for m in msgs if (m.side, m.text.strip(), getattr(m, "sender", "")) not in existing_sigs]
+        if new_additions:
+            self._chat_messages.extend(new_additions)
+            self._render_timeline(scroll_to_bottom=True)
+            self._dispatch_judgments_for_messages(new_additions)
+
+    @objc.python_method
+    def _dispatch_judgments_for_messages(self, msgs):
+        thems = [m for m in msgs if getattr(m, "side", "") == "them" and (getattr(m, "text", "") or "").strip()]
+        if not thems:
             return
 
         epoch = self._reply_epoch
-        ctx = self._context_text(msgs, target_m, JUDGE_TURNS)
-        with getattr(self, "_timeline_lock", threading.Lock()):
-            self._timeline_req = (epoch, text, ctx)
-            if not getattr(self, "_timeline_running", False):
-                self._timeline_running = True
-                threading.Thread(target=self._timeline_judge_loop, daemon=True).start()
+        new_tasks = []
+
+        for m in reversed(thems):
+            txt = m.text.strip()
+            if txt in ("[表情]", "［表情］", "[动画表情]"):
+                if txt not in self._chat_judgments:
+                    self._chat_judgments[txt] = {
+                        "appeal": {"choice": "随性闲聊", "tip": "表情包互动，轻松随和"},
+                        "urgency": {"choice": "常规无催", "tip": "无紧迫时限要求"},
+                        "strategy": {"choice": "顺势承接礼貌回应", "tip": "友好自然互动，维持融洽氛围"},
+                        "summary": "要你: 随性闲聊  ·  时效: 常规无催  ·  建议: 顺势承接礼貌回应",
+                    }
+                continue
+            if txt.startswith("[图片]") or txt.startswith("［图片］"):
+                if txt not in self._chat_judgments:
+                    self._chat_judgments[txt] = {
+                        "appeal": {"choice": "核对确认", "tip": "图片材料核验与查看"},
+                        "urgency": {"choice": "常规无催", "tip": "按正常节奏查看回复"},
+                        "strategy": {"choice": "顺势承接礼貌回应", "tip": "收到确认，就图片内容具体承接"},
+                        "summary": "要你: 核对确认  ·  时效: 常规无催  ·  建议: 顺势承接礼貌回应",
+                    }
+                continue
+
+            if txt not in self._chat_judgments:
+                self._chat_judgments[txt] = {"status": "pending"}
+                ctx = self._context_text(self._chat_messages, m, JUDGE_TURNS)
+                new_tasks.append((epoch, txt, ctx))
+
+        self._render_timeline()
+
+        if not new_tasks:
+            return
+
+        with self._judgment_lock:
+            self._judgment_queue.extend(new_tasks)
+            if not self._judgment_workers_running:
+                self._judgment_workers_running = True
+                num_workers = min(self._max_judgment_workers, len(self._judgment_queue))
+                for _ in range(max(1, num_workers)):
+                    threading.Thread(target=self._judgment_worker_loop, daemon=True).start()
 
     @objc.python_method
-    def _timeline_judge_loop(self):
-        """时间线异步研判循环：latest-wins 槽位机制，自动补跑新消息，且具备严格的 epoch 守卫。"""
+    def _judgment_worker_loop(self):
         while True:
-            with self._timeline_lock:
-                req = self._timeline_req
-                self._timeline_req = None
-                if req is None:
-                    self._timeline_running = False
+            with self._judgment_lock:
+                if not self._judgment_queue:
+                    self._judgment_workers_running = False
                     break
-            epoch, text, ctx = req
+                epoch, text, ctx = self._judgment_queue.pop(0)
+
             if epoch != self._reply_epoch or self._paused:
                 continue
+
             try:
                 res = self.judge.multi_judge(text, context=ctx)
             except Exception as e:
                 res = {"error": str(e), "message": text}
+
             if epoch == self._reply_epoch and not self._paused:
                 self.performSelectorOnMainThread_withObject_waitUntilDone_(
                     "applyJudgmentResult:", (epoch, text, res), False
@@ -1494,7 +1622,7 @@ class HudController(NSObject):
                 res = read_conversation_via_cli(
                     target_chat=getattr(self, "_selected_target_chat", None),
                     prev_key=getattr(self, "_cli_prev_key", None),
-                    max_messages=15,
+                    max_messages=25,
                 )
                 if res.get("snapshot_key"):
                     self._cli_prev_key = res["snapshot_key"]
@@ -1763,8 +1891,7 @@ class HudController(NSObject):
                     self._judged_once = True
                     note = "（首次，含本地模型加载）" if first else ""
                     _log(f"预判 {ms:.0f}ms → {verdict.get('intent', '?')}"
-                         f" 把握 {verdict.get('confidence', 0):.0%}"
-                         f" 风险 {verdict.get('risk', '?')}{note}（待停稳上屏）")
+                         f" 把握 {verdict.get('confidence', 0):.0%}{note}（待停稳上屏）")
                 except Exception as e:
                     _log(f"预判失败 {type(e).__name__}: {str(e)[:60]}")
                     verdict = None
@@ -1862,15 +1989,9 @@ class HudController(NSObject):
                 return
             context = self._context_text(msgs, newest)
             strat = ""
-            risk_w = ""
             if verdict:
                 strat_obj = verdict.get("strategy")
                 strat = strat_obj.get("choice", "") if isinstance(strat_obj, dict) else str(strat_obj or "")
-                risk_obj = verdict.get("risk")
-                if isinstance(risk_obj, dict):
-                    risk_w = risk_obj.get("warning") or (risk_obj.get("category") if risk_obj.get("has_risk") else "")
-                else:
-                    risk_w = str(risk_obj or "")
             gen, wait_ms = self._take_pregen(newest.text, tuple(self.slot_tones))
             if not self._reply_current():
                 return
@@ -1879,7 +2000,7 @@ class HudController(NSObject):
                 gen = self.generator.generate(
                     newest.text, verdict.get("intent", ""), list(self.slot_tones),
                     context, self._stream_hook(t0),
-                    strategy=strat, risk_warning=risk_w
+                    strategy=strat
                 )
             self._finish_generate(gen, newest, t0, verdict, note)
         except Exception as e:
@@ -1919,7 +2040,7 @@ class HudController(NSObject):
 
     @objc.python_method
     def _analyze(self, newest, msgs, prev_text: str = ""):
-        """Judge message intent and risk via unified Judge. Generate candidates in parallel."""
+        """Judge appeal, urgency, and strategy. Generate candidates in parallel."""
         t0 = time.perf_counter()
         context = self._context_text(msgs, newest)
         verdict = None
@@ -1933,8 +2054,7 @@ class HudController(NSObject):
             self._judged_once = True
             note = ""
             _log(f"判断 {ms:.0f}ms → {verdict.get('intent', '?')}"
-                 f" 把握 {verdict.get('confidence', 0):.0%}"
-                 f" 风险 {verdict.get('risk', '?')}{note}")
+                 f" 把握 {verdict.get('confidence', 0):.0%}{note}")
             self._push("applyJudgment:", (verdict, newest.sender, prev_text))
         except (LowMemoryError, ModelNotDownloadedError) as e:
             _log(f"判断被拒 {type(e).__name__}: {str(e)[:60]}")
@@ -1949,15 +2069,9 @@ class HudController(NSObject):
             return
 
         strat = ""
-        risk_w = ""
         if verdict:
             strat_obj = verdict.get("strategy")
             strat = strat_obj.get("choice", "") if isinstance(strat_obj, dict) else str(strat_obj or "")
-            risk_obj = verdict.get("risk")
-            if isinstance(risk_obj, dict):
-                risk_w = risk_obj.get("warning") or (risk_obj.get("category") if risk_obj.get("has_risk") else "")
-            else:
-                risk_w = str(risk_obj or "")
 
         try:
             tones = tuple(self.slot_tones)
@@ -1968,7 +2082,7 @@ class HudController(NSObject):
                 gen = self.generator.generate(
                     newest.text, verdict.get("intent", ""), list(tones),
                     context, self._stream_hook(t0),
-                    strategy=strat, risk_warning=risk_w
+                    strategy=strat
                 )
             self._finish_generate(gen, newest, t0, verdict)
         except Exception as e:
@@ -2119,11 +2233,17 @@ class HudController(NSObject):
         selected_title = sender.titleOfSelectedItem()
         if selected_title and selected_title != "选择会话…":
             self._selected_target_chat = selected_title
+            self._current_chat = selected_title
             self._reply_epoch += 1
             self._cli_prev_key = None
             self._next_read_ts = time.time()
             self._chat_messages = []
             self._chat_judgments = {}
+            self._history_offset = 0
+            self._history_loading = False
+            self._has_more_history = True
+            with getattr(self, "_judgment_lock", threading.Lock()):
+                self._judgment_queue.clear()
             self._last_rendered_signature = None
             self._render_timeline()
             self._push("applyStatus:", f"已选择会话: {selected_title}")
@@ -2152,7 +2272,6 @@ class HudController(NSObject):
         self._show()
         # kept so a 话术 change can re-rank the new candidates against the same verdict
         self._last_intent = v.get("intent", "")
-        self._last_risk = v.get("risk", 0)   # and so the overlay can badge the message
         self._last_verdict = v
         msg_text = v.get("message")
         if msg_text:
@@ -2177,18 +2296,6 @@ class HudController(NSObject):
         # the intent recognition rate, read off the judged intent — same muted slot
         conf_val = v.get("confidence", 0.0)
         self._render("confidence", f"意图识别率 {conf_val:.0%}", PALETTE["muted"])
-        # Rounded, so the panel does not claim a precision it has
-        risk_raw = v.get("risk", 0)
-        if isinstance(risk_raw, dict):
-            risk = int(round(float(risk_raw.get("score", 0))))
-        else:
-            risk = int(round(float(v.get("danger", {}).get("score") or risk_raw or 0)))
-        label = "安全" if risk <= 3 else ("留神" if risk <= 6 else "危险")
-        color = PALETTE["green"] if risk <= 3 else (
-            PALETTE["amber"] if risk <= 6 else PALETTE["red"])
-        self._render("risk", f"● {label}  {risk}/9", color)
-        if hasattr(self, "_risk_dots"):
-            self._set_risk_scale(risk)
         act_text = ""
         if v.get("strategy"):
             strat = v.get("strategy")
@@ -2312,7 +2419,6 @@ class HudController(NSObject):
                 or NSFont.boldSystemFontOfSize_(10))
         judged = (newest_text is not None and newest_text == self.analyzed_text
                   and bool(self._last_intent))
-        risk = int(round(float(self._last_risk)))
         boxes = []
         for m in msgs:
             if m.w <= 0:
@@ -2320,10 +2426,9 @@ class HudController(NSObject):
             who = m.sender or {"them": "对方", "me": "我"}.get(m.side, "方向未确认")
             label = f"{who} {m.conf:.2f}"
             if judged and m.side == "them" and m.text == newest_text:
-                color = (PALETTE["green"] if risk <= 3 else
-                         PALETTE["amber"] if risk <= 6 else PALETTE["red"])
+                color = PALETTE["accent"]
                 lw = 2.5
-                label += f" · {self._last_intent} 风险{risk}/9"
+                label += f" · {self._last_intent}"
             else:
                 color = _rgb(0x576B95) if m.side == "me" else PALETTE["green"]
                 lw = 1.5
@@ -2397,7 +2502,7 @@ def main() -> None:
     warn_if_no_generation_key()
     controller = HudController.alloc().init()
     app.setDelegate_(controller)
-    _log(f"启动 · TypeSafe Jev 多维研判模式（言外之意/意图/危险等级/应对动作）"
+    _log(f"启动 · TypeSafe Jev 多维研判模式（诉求/时效/建议）"
          + (" · YOLO 框开" if controller._show_boxes else ""))
     try:
         from perception import find_wechat_window

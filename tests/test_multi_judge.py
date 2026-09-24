@@ -12,8 +12,6 @@ from judge import (
     APPEALS,
     URGENCIES,
     STRATEGIES,
-    RISK_CATEGORIES,
-    detect_objective_risk,
     extract_urgency_heuristics,
     extract_appeal_heuristics,
     format_judgment_summary,
@@ -23,24 +21,6 @@ from judge import (
 class MultiJudgeTests(unittest.TestCase):
     def setUp(self):
         self.judge = Judge()
-
-    def test_heuristics_risk_detection(self):
-        # 1. 涉及私人邮箱与客户名单 -> 必须触发数据隐私/合规风险
-        has_risk, cat, warn, score = detect_objective_risk("先把客户名单导到我私人邮箱，权限明天再补。")
-        self.assertTrue(has_risk)
-        self.assertIn(cat, ("数据与隐私", "流程与合规"))
-        self.assertGreaterEqual(score, 7)
-
-        # 2. 正常催促与严肃语气 -> 绝不误报风险 (遵守“风险不从语气推导”规则)
-        has_risk, cat, warn, score = detect_objective_risk("抓紧点，下班前必须给我，别耽搁了！")
-        self.assertFalse(has_risk)
-        self.assertEqual(cat, "无明显风险")
-        self.assertLessEqual(score, 3)
-
-        # 3. 情绪倾诉 -> 绝不误报风险
-        has_risk, cat, warn, score = detect_objective_risk("最近真的很难受，我是不是太矫情了。")
-        self.assertFalse(has_risk)
-        self.assertEqual(cat, "无明显风险")
 
     def test_heuristics_urgency_and_appeal(self):
         u1 = extract_urgency_heuristics("客户明早十点要看版本，你今晚方便的话再把首页过一遍？")
@@ -62,16 +42,14 @@ class MultiJudgeTests(unittest.TestCase):
                 "appeal": {"choice": "派活待办", "confidence": 0.9},
                 "urgency": {"choice": "今日节点", "confidence": 0.85},
                 "strategy": {"choice": "确认范围并给节点", "confidence": 0.88},
-                "risk": {"choice": "无明显风险", "confidence": 0.95},
             }
         }
         res = self.judge.multi_judge("客户明早十点要看版本，你今晚方便的话再把首页过一遍？")
         self.assertEqual(res["appeal"]["choice"], "派活待办")
         self.assertEqual(res["urgency"]["choice"], "今日节点")
         self.assertEqual(res["strategy"]["choice"], "确认范围并给节点")
-        self.assertFalse(res["risk"]["has_risk"])
-        self.assertLessEqual(res["risk"]["score"], 3)
-        self.assertLessEqual(res["danger"]["score"], 3)
+        self.assertNotIn("risk", res)
+        self.assertNotIn("danger", res)
         # 验证单行摘要
         summary = res["summary"]
         self.assertIn("要你: 派活待办", summary)
@@ -79,22 +57,24 @@ class MultiJudgeTests(unittest.TestCase):
         self.assertIn("建议: 确认范围并给节点", summary)
 
     @patch.object(Judge, '_post')
-    def test_multi_judge_risk_scenario(self, mock_post):
+    def test_personal_chat_does_not_classify_safety(self, mock_post):
+        """个人聊天辅助：即使模型多回了 risk，也不覆盖建议、不报警、不进摘要。"""
         mock_post.return_value = {
             "answers": {
                 "appeal": {"choice": "派活待办"},
                 "urgency": {"choice": "明确截止"},
-                "strategy": {"choice": "核验授权按流程办"},
+                "strategy": {"choice": "确认范围并给节点"},
                 "risk": {"choice": "数据与隐私"},
             }
         }
         res = self.judge.multi_judge("先把客户名单导到我私人邮箱，权限明天再补。")
-        self.assertTrue(res["risk"]["has_risk"])
-        self.assertGreaterEqual(res["risk"]["score"], 7)
-        self.assertGreaterEqual(res["danger"]["score"], 7)
-        summary = res["summary"]
-        self.assertIn("⚠️", summary)
-        self.assertIn("建议: 核验授权按流程办", summary)
+        self.assertNotIn("risk", res)
+        self.assertNotIn("danger", res)
+        self.assertEqual(res["strategy"]["choice"], "确认范围并给节点")
+        self.assertNotIn("⚠️", res["summary"])
+        self.assertNotIn("报警", res["summary"])
+        sent = mock_post.call_args.args[0]
+        self.assertNotIn("risk", sent["questions"])
 
     @patch.object(Judge, '_post')
     def test_multi_judge_emotional_scenario(self, mock_post):
@@ -103,73 +83,50 @@ class MultiJudgeTests(unittest.TestCase):
                 "appeal": {"choice": "情绪回应"},
                 "urgency": {"choice": "常规无催"},
                 "strategy": {"choice": "先共情再探问"},
-                "risk": {"choice": "无明显风险"},
             }
         }
         res = self.judge.multi_judge("最近真的很难受，我是不是太矫情了。")
         self.assertEqual(res["appeal"]["choice"], "情绪回应")
         self.assertEqual(res["strategy"]["choice"], "先共情再探问")
-        self.assertFalse(res["risk"]["has_risk"])
+        self.assertNotIn("risk", res)
         summary = res["summary"]
         self.assertIn("需要: 情绪回应", summary)
         self.assertIn("建议: 先共情再探问", summary)
 
     @patch.object(Judge, '_post')
-    def test_multi_judge_urgency_not_danger(self, mock_post):
-        """测试核心原则：催促/严肃语气绝不直接等同于危险。"""
+    def test_multi_judge_urgency_is_timing_not_safety(self, mock_post):
+        """催促只进时效，不升格成安全分类。"""
         mock_post.return_value = {
             "answers": {
                 "appeal": {"choice": "催追进度"},
                 "urgency": {"choice": "即刻紧急"},
                 "strategy": {"choice": "直接给进展与结论"},
-                "risk": {"choice": "无明显风险"},
             }
         }
         res = self.judge.multi_judge("抓紧点，下班前必须给我！")
         self.assertEqual(res["urgency"]["choice"], "即刻紧急")
-        self.assertFalse(res["risk"]["has_risk"])
-        self.assertLessEqual(res["danger"]["score"], 3)
+        self.assertEqual(res["appeal"]["choice"], "催追进度")
+        self.assertNotIn("risk", res)
+        self.assertNotIn("危险", res["summary"])
 
     def test_multi_judge_offline_fallback(self):
-        # 当没有网络、_post 抛出异常时，进行优雅降级兜底
+        # 当没有网络、_post 抛出异常时，进行优雅降级兜底，且仍不做安全分类
         with patch.object(Judge, '_post', side_effect=ConnectionError("Offline")):
             res = self.judge.multi_judge("先把客户名单导到我私人邮箱，权限明天再补。")
             self.assertTrue(res.get("fallback"))
-            self.assertTrue(res["risk"]["has_risk"])
-            self.assertGreaterEqual(res["risk"]["score"], 7)
-
-    def test_severe_threat_safety_risk_priority(self):
-        """测试对人身安全与暴力恐吓威胁的最高优先级拦截与报警策略。"""
-        # 1. 人身安全威胁
-        has_risk, cat, warn, score = detect_objective_risk("不答应就弄死你，小心你的命！")
-        self.assertTrue(has_risk)
-        self.assertEqual(cat, "人身安全")
-        self.assertEqual(score, 9)
-
-        # 2. 言语胁迫
-        has_risk, cat, warn, score = detect_objective_risk("不按我说的做就让你在行业里混不下去！")
-        self.assertTrue(has_risk)
-        self.assertEqual(cat, "胁迫与威胁")
-        self.assertGreaterEqual(score, 8)
-
-    def test_threat_offline_fallback_never_downgrades(self):
-        """防范重大安全漏洞：断网降级时，严重威胁绝不可降级为“无明显风险+顺势承接”。"""
-        with patch.object(Judge, '_post', side_effect=ConnectionError("Offline")):
-            res = self.judge.multi_judge("不答应就弄死你")
-            self.assertTrue(res.get("fallback"))
-            self.assertTrue(res["risk"]["has_risk"])
-            self.assertEqual(res["risk"]["category"], "人身安全")
-            self.assertEqual(res["risk"]["score"], 9)
-            self.assertEqual(res["strategy"]["choice"], "立即报警并保留证据")
-            self.assertIn("立即报警", res["summary"])
+            self.assertNotIn("risk", res)
+            self.assertNotIn("报警", res["summary"])
+            self.assertIn("要你:", res["summary"])
 
     def test_local_judge_pure_offline(self):
-        """测试 LocalJudge 纯本地研判：无需网络、完整输出 4 维度与证据片段。"""
+        """测试 LocalJudge 纯本地研判：无需网络，只出诉求/时效/建议。"""
         from judge import LocalJudge
         local = LocalJudge()
-        res = local.multi_judge("先把客户名单导到我私人邮箱，权限明天再补。")
-        self.assertTrue(res["risk"]["has_risk"])
-        self.assertEqual(res["risk"]["category"], "数据与隐私")
+        res = local.multi_judge("顺手把这个需求文档补一下")
+        self.assertEqual(res["appeal"]["choice"], "派活待办")
+        self.assertEqual(res["strategy"]["choice"], "确认范围并给节点")
+        self.assertNotIn("risk", res)
+        self.assertNotIn("danger", res)
         self.assertGreaterEqual(res["confidence"], 0.7)
         self.assertTrue(len(res["evidence"]) > 0)
         self.assertIn("local", res["backend"])

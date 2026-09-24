@@ -19,7 +19,7 @@ the same setting names is how you end up carefully editing the one nothing reads
 
 The names are the conventional ones you likely already export for other tools:
 
-    TYPESAFE_API_KEY     TypeSafe Jev — the "mouthless" model that judges intent + risk
+    TYPESAFE_API_KEY     TypeSafe Jev — the "mouthless" model that judges appeal, urgency, strategy
     TYPESAFE_BASE_URL    default https://api.typesafe.ai   (gateways: see README)
     TYPESAFE_MODEL       default jev-latest
 
