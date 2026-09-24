@@ -111,12 +111,17 @@ def write_text(text, target, app):
     time.sleep(.15)
     if not window_is_current(win,app,require_front=True):
         return False,'微信没有获得焦点，请先点微信输入区再重试'
-    for event_type in (Q.kCGEventLeftMouseDown,Q.kCGEventLeftMouseUp):
-        event=Q.CGEventCreateMouseEvent(None,event_type,point,Q.kCGMouseButtonLeft)
-        Q.CGEventSetFlags(event, 0)
-        Q.CGEventSetIntegerValueField(event, Q.kCGMouseEventClickState, 1)
-        Q.CGEventPost(Q.kCGHIDEventTap,event)
-    time.sleep(.15)
+    Q.CGWarpMouseCursorPosition(point)
+    time.sleep(.03)
+    for _ in range(2):
+        for event_type in (Q.kCGEventLeftMouseDown, Q.kCGEventLeftMouseUp):
+            event = Q.CGEventCreateMouseEvent(None, event_type, point, Q.kCGMouseButtonLeft)
+            Q.CGEventSetFlags(event, 0)
+            Q.CGEventSetIntegerValueField(event, Q.kCGMouseEventClickState, 1)
+            Q.CGEventPost(Q.kCGHIDEventTap, event)
+            time.sleep(.04)
+        time.sleep(.04)
+    time.sleep(.12)
     if not window_is_current(win,app,require_front=True):
         return False,'焦点发生变化，已停止填入'
     if not same_signature(chat_signature(win,rect),signature):
