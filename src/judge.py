@@ -798,10 +798,9 @@ JevJudge = Judge
 
 def make_judge() -> Judge | LocalJudge | FallbackJudge:
     backend = (userconfig.get("JUDGE_BACKEND") or "").strip().lower()
-    has_key = jev_configured()
-    if backend == "cloud" or (backend != "local" and has_key):
-        return FallbackJudge()
-    return LocalJudge()
+    if backend == "local":
+        return LocalJudge()
+    return FallbackJudge()
 
 
 if __name__ == "__main__":

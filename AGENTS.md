@@ -1,10 +1,10 @@
 # AGENTS.md
 
-微信悬浮窗助手（macOS）：OCR 读微信窗口 → 本地模型判意图/风险 → LLM 生成候选回复 → 悬浮窗展示/一键填入。纯只读、零封号风险是**核心原则**，任何改动不得破坏。
+微信悬浮窗助手（macOS）：OCR 读微信窗口 → 云端 Jev 判诉求/时效/建议/独立风险 → LLM 生成候选回复 → 悬浮窗展示/一键填入。纯只读、零封号风险是**核心原则**，任何改动不得破坏。
 
 ## 目录与命令
 
-- `src/perception.py` 抓图+OCR+抽消息；`src/judge.py` 本地判断（decider-2b）；`src/judge_jev.py` 云端判断（TypeSafe Jev）；`src/generate.py` 候选生成（OpenAI/Anthropic 兼容 API）；`src/hud.py` 悬浮窗+轮询主循环；`src/fill.py` 辅助功能写入；`src/styles.py` 话术；`src/userconfig.py` 配置加载
+- `src/perception.py` 抓图+OCR+抽消息；`src/judge.py` 云端多维研判（TypeSafe Jev）；`src/judge_jev.py` 兼容别名；`src/generate.py` 候选生成（OpenAI/Anthropic 兼容 API）；`src/hud.py` 悬浮窗+轮询主循环；`src/fill.py` 辅助功能写入；`src/styles.py` 话术；`src/userconfig.py` 配置加载
 - 启动：`./start.command`（用户平时的方式；`Ctrl+C` 退出）。没有正式测试套件，分层自测：
 
   ```bash
