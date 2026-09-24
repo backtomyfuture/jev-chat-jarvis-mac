@@ -151,7 +151,7 @@ THINKING_ONLY_HINT = ("思考型 {model}：额度被思考耗尽，正文 0 条�
 PROMPT_ONE = """刚收到一条微信消息，你要帮我回。
 
 {context_line}消息：「{message}」
-{intent_line}
+{intent_line}{strategy_line}{risk_line}
 请写 {n} 条回复候选，语气统一成下面这一种，但两条的胆量要有差别：
 「{tone}」{instruction}
 
@@ -431,7 +431,7 @@ class Generator:
             return raw
 
         url = _endpoint(base, "openai")
-        body = {"model": model, "max_tokens": 300, "temperature": 0.9,
+        body = {"model": model, "max_tokens": 1200, "temperature": 0.9,
                 "messages": [{"role": "user", "content": prompt}]}
         body.update(_extra_params())
         headers = {"content-type": "application/json", "authorization": f"Bearer {key}"}
@@ -525,7 +525,9 @@ class Generator:
 
     def _one_tone(self, message: str, intent: str, tone: str,
                   context: str | None = None,
-                  on_line=None) -> tuple[list[str], str]:
+                  on_line=None,
+                  strategy: str = "",
+                  risk_warning: str = "") -> tuple[list[str], str]:
         """One request for one tone. Returns (texts, error); never raises.
 
         With `on_line`, each finished line is handed over the moment it completes so the
@@ -535,9 +537,13 @@ class Generator:
         # The recent turns go in with their speakers ("王总: …"), because a reply that fits
         # the last two sentences is usually not a reply to this one sentence in isolation.
         context_line = f"最近的对话：\n{context}\n\n" if context else ""
-        intent_line = f"判断出的意图：{intent}\n" if intent else ""
+        intent_line = f"核心诉求：{intent}\n" if intent else ""
+        strategy_line = f"应对建议：{strategy}\n" if strategy else ""
+        risk_line = f"⚠️ 避坑防范：{risk_warning}\n" if risk_warning else ""
         prompt = PROMPT_ONE.format(message=message, context_line=context_line,
                                    intent_line=intent_line,
+                                   strategy_line=strategy_line,
+                                   risk_line=risk_line,
                                    n=styles.PER_TONE, tone=tone,
                                    instruction=styles.PRESETS[tone])
         emitted = 0
@@ -577,7 +583,9 @@ class Generator:
     def generate(self, message: str, intent: str = "",
                  slot_tones: list[str] | None = None,
                  context: str | None = None,
-                 on_candidate=None) -> dict:
+                 on_candidate=None,
+                 strategy: str = "",
+                 risk_warning: str = "") -> dict:
         """One concurrent request per selected 话术; returns the candidates grouped by tone.
 
         A tone gets its own request rather than one request listing every tone: asking a
@@ -607,7 +615,9 @@ class Generator:
             def on_line(text: str) -> None:
                 on_candidate(i, tone, text)
             return self._one_tone(message, intent, tone, context,
-                                  on_line if on_candidate is not None else None)
+                                  on_line if on_candidate is not None else None,
+                                  strategy=strategy,
+                                  risk_warning=risk_warning)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(active)) as ex:
             futures = {i: ex.submit(run, i, tone) for i, tone in active}
