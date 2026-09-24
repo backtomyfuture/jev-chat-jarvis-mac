@@ -130,6 +130,14 @@ def frontmost_app_is_wechat() -> bool | None:
         app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
         if app is None:
             return None
+        if hasattr(AppKit, "NSRunningApplication"):
+            try:
+                curr = AppKit.NSRunningApplication.currentApplication()
+                if curr and hasattr(app, "processIdentifier") and hasattr(curr, "processIdentifier"):
+                    if app.processIdentifier() == curr.processIdentifier():
+                        return True
+            except Exception:
+                pass
         bundle = app.bundleIdentifier() or ""
         name = app.localizedName() or ""
         return bundle == "com.tencent.xinWeChat" or name in WECHAT_APP_NAMES

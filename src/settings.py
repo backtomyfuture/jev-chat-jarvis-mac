@@ -19,9 +19,89 @@ import ui_style
 PALETTE = ui_style.PALETTE
 
 
+def ensure_app_edit_menu():
+    app = A.NSApplication.sharedApplication()
+    if app.mainMenu() is not None and app.mainMenu().numberOfItems() > 0:
+        return
+    main_menu = A.NSMenu.alloc().init()
+    edit_item = A.NSMenuItem.alloc().init()
+    edit_menu = A.NSMenu.alloc().initWithTitle_("Edit")
+    for title, action, key in (
+        ("撤销", "undo:", "z"),
+        ("重做", "redo:", "Z"),
+        ("剪切", "cut:", "x"),
+        ("复制", "copy:", "c"),
+        ("粘贴", "paste:", "v"),
+        ("全选", "selectAll:", "a"),
+    ):
+        item = A.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, action, key)
+        edit_menu.addItem_(item)
+    edit_item.setSubmenu_(edit_menu)
+    main_menu.addItem_(edit_item)
+    app.setMainMenu_(main_menu)
+
+
+class SettingsWindow(A.NSWindow):
+    def performKeyEquivalent_(self, event):
+        flags = event.modifierFlags() & A.NSEventModifierFlagDeviceIndependentFlagsMask
+        if flags == A.NSEventModifierFlagCommand:
+            chars = event.charactersIgnoringModifiers().lower()
+            resp = self.firstResponder()
+            if chars == "v":
+                if hasattr(resp, "paste_"):
+                    resp.paste_(None)
+                    return True
+                if isinstance(resp, A.NSTextField):
+                    pb = A.NSPasteboard.generalPasteboard()
+                    t = pb.stringForType_(A.NSPasteboardTypeString)
+                    if t is not None:
+                        resp.setStringValue_(t)
+                        return True
+            elif chars == "c":
+                if hasattr(resp, "copy_"):
+                    resp.copy_(None)
+                    return True
+                if isinstance(resp, A.NSTextField):
+                    pb = A.NSPasteboard.generalPasteboard()
+                    pb.clearContents()
+                    pb.setString_forType_(resp.stringValue(), A.NSPasteboardTypeString)
+                    return True
+            elif chars == "x":
+                if hasattr(resp, "cut_"):
+                    resp.cut_(None)
+                    return True
+                if isinstance(resp, A.NSTextField):
+                    pb = A.NSPasteboard.generalPasteboard()
+                    pb.clearContents()
+                    pb.setString_forType_(resp.stringValue(), A.NSPasteboardTypeString)
+                    resp.setStringValue_("")
+                    return True
+            elif chars == "a":
+                if hasattr(resp, "selectAll_"):
+                    resp.selectAll_(None)
+                    return True
+                if hasattr(resp, "selectText_"):
+                    resp.selectText_(None)
+                    return True
+            elif chars == "z":
+                undo_mgr = getattr(resp, "undoManager", lambda: None)() or self.undoManager()
+                if undo_mgr and undo_mgr.canUndo():
+                    undo_mgr.undo()
+                    return True
+        elif flags == (A.NSEventModifierFlagCommand | A.NSEventModifierFlagShift):
+            chars = event.charactersIgnoringModifiers().lower()
+            if chars == "z":
+                undo_mgr = getattr(resp, "undoManager", lambda: None)() or self.undoManager()
+                if undo_mgr and undo_mgr.canRedo():
+                    undo_mgr.redo()
+                    return True
+        return objc.super(SettingsWindow, self).performKeyEquivalent_(event)
+
+
 class SettingsController(NSObject):
     @objc.python_method
     def build(self):
+        ensure_app_edit_menu()
         self.path = userconfig.env_files()[0]
         self.original = config.read_document(self.path)
         values = userconfig.parse_env_file(self.path)
@@ -30,7 +110,7 @@ class SettingsController(NSObject):
         self.fields = {}
         self.controls = []
         self.busy = False
-        self.window = A.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+        self.window = SettingsWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, 760, 648),
             A.NSWindowStyleMaskTitled | A.NSWindowStyleMaskClosable,
             A.NSBackingStoreBuffered, False)
@@ -228,16 +308,9 @@ class SettingsController(NSObject):
 
     @objc.python_method
     def refresh_offline_section(self):
-        cached = judge.model_cached()
-        if cached:
-            text = f"离线判断模型：已下载（{judge.model_disk_usage() / 1e9:.1f} GB 磁盘占用）"
-            if userconfig.get("JUDGE_BACKEND").strip().lower() == "cloud":
-                text += " · 当前选择在线判断"
-        else:
-            text = "离线判断模型：未下载 · 启用后下次启动预热时下载（约 3.8 GB）"
-        self.offline_label.setStringValue_(text)
-        self.offline_delete_btn.setHidden_(not cached)
-        self.offline_enable_btn.setHidden_(cached)
+        self.offline_label.setStringValue_("判断层：采用远端 TypeSafe Jev 模型（免下载、即开即用）")
+        self.offline_delete_btn.setHidden_(True)
+        self.offline_enable_btn.setHidden_(True)
 
     def deleteOfflineModel_(self, sender):
         alert = A.NSAlert.alloc().init()

@@ -57,7 +57,7 @@ class HudReplyTests(unittest.TestCase):
         for name in ['applyIncoming_', 'applyPending_', 'applyJudgment_',
                      'applyCandidates_', 'applyStreamLine_', 'applyError_',
                      'applyPosition_', 'applyChat_', 'applyBoxes_', 'applyHidden_',
-                     'applyForegroundHidden_']:
+                     'applyForegroundHidden_', 'applyTimelineMessages_']:
             setattr(h, name, Mock())
         self.queue = []
         h.performSelectorOnMainThread_withObject_waitUntilDone_ = lambda s, p, w: self.queue.append((s, p))

@@ -23,7 +23,7 @@ def hud_harness():
     tree = ast.parse((ROOT / 'src/hud.py').read_text())
     source = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'HudController')
     names = {'_work_inner', '_set_foreground_state', '_push', '_reply_task', '_reply_current', '_push_reply',
-             'applyReplyUpdate_', 'applyWaiting_', '_context_text', '_stream_hook',
+             'applyReplyUpdate_', 'applyWaiting_', 'applyTimelineMessages_', '_context_text', '_stream_hook',
              '_take_pregen', '_gen_with_pregen', '_finish_generate',
              '_prejudge_loop', '_pregen_loop'}
     methods = [n for n in source.body if isinstance(n, ast.FunctionDef) and n.name in names]

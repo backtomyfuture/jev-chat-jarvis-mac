@@ -42,3 +42,17 @@
 - AppKit 控件宽度要渲染成 PNG 实测，`cellSize()` 会谎报。
 - 判断模型冷启动 10–20s 是已知问题（见 issue #1 预热方案）；启动后第一条慢是正常现象，别误判成回归。
 - 改动用户可见行为要同步 README；待办与已定方案看 GitHub issues 和 README「下一步」。
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs are tracked in GitHub Issues via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Canonical triage roles mapped 1:1 (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout (`CONTEXT.md` at root, ADRs in `docs/adr/`). See `docs/agents/domain.md`.

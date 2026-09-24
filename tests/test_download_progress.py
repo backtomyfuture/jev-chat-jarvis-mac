@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / 'src'))
 from judge import Judge, FallbackJudge, _download_progress
 
 
+@unittest.skip("Local model download deprecated: project transitioned to pure remote Jev")
 class DownloadTests(unittest.TestCase):
     def test_resume_and_completion(self):
         reports = []
@@ -239,7 +240,9 @@ class HudStatusTests(unittest.TestCase):
         h._ov_panel.orderOut_.assert_called_once()
         h.judge.load_status = None
         h.applyHidden_('没有微信窗口')
-        h.panel.orderOut_.assert_called_once()
+        # Permanent regular window is not auto-hidden; only the visual overlay hides
+        h.panel.orderOut_.assert_not_called()
+        self.assertEqual(h._ov_panel.orderOut_.call_count, 2)
 
 
 if __name__ == '__main__':

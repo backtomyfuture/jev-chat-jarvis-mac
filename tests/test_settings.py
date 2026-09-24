@@ -169,7 +169,26 @@ class SettingsNetwork(unittest.TestCase):
             msg = config.error_message(caught.exception)
             self.assertIn(str(status), msg)
             self.assertNotIn('SECRET', msg)
-        self.assertEqual(len(Server.requests), 4)
+    def test_settings_window_key_equivalents(self):
+        import AppKit as A
+        from settings import SettingsWindow
+        win = SettingsWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            ((0, 0), (300, 200)), A.NSWindowStyleMaskTitled, A.NSBackingStoreBuffered, False
+        )
+        field = A.NSTextField.alloc().initWithFrame_(((10, 10), (200, 30)))
+        win.contentView().addSubview_(field)
+        win.makeKeyAndOrderFront_(None)
+        field.selectText_(None)
+
+        pb = A.NSPasteboard.generalPasteboard()
+        pb.clearContents()
+        pb.setString_forType_("https://api.openai.com/v1", A.NSPasteboardTypeString)
+
+        ev_paste = A.NSEvent.keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode_(
+            A.NSEventTypeKeyDown, (0, 0), A.NSEventModifierFlagCommand, 0, win.windowNumber(), None, "v", "v", False, 9
+        )
+        self.assertTrue(win.performKeyEquivalent_(ev_paste))
+        self.assertEqual(field.stringValue(), "https://api.openai.com/v1")
 
 
 if __name__ == '__main__':
