@@ -244,7 +244,10 @@ class HudController(NSObject):
         self._chat_messages = []
         self._chat_judgments = {}
         self._last_rendered_signature = None
-        self._multi_judging = False
+        self._timeline_req = None
+        self._timeline_running = False
+        self._timeline_lock = threading.Lock()
+        self._last_verdict = None
         self._analyzing = False     # judge+generate runs off the tick path
         # Pre-judgment: the local judge starts the moment a new message is seen, and the
         # settle gate consumes the verdict if the text is unchanged — intent/risk land on
@@ -681,21 +684,54 @@ class HudController(NSObject):
         self._render_timeline()
         thems = [m for m in msgs if getattr(m, "side", "") == "them" and getattr(m, "text", "")]
         target_m = thems[-1] if thems else None
-        if target_m and target_m.text not in self._chat_judgments and not getattr(self, "_multi_judging", False):
-            self._multi_judging = True
-            def judge_worker():
-                try:
-                    ctx = self._context_text(msgs, target_m, JUDGE_TURNS)
-                    res = self.judge.multi_judge(target_m.text, context=ctx)
-                    self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                        "applyJudgmentResult:", (target_m.text, res), False
-                    )
-                finally:
-                    self._multi_judging = False
-            threading.Thread(target=judge_worker, daemon=True).start()
+        if not target_m:
+            return
+        text = target_m.text
+        if text in self._chat_judgments:
+            return
+        # 若主链刚完成同条文本研判，直接复用其 verdict 避免重复网络开销
+        if getattr(self, "analyzed_text", None) == text and getattr(self, "_last_verdict", None):
+            self._chat_judgments[text] = self._last_verdict
+            self._render_timeline()
+            return
+
+        epoch = self._reply_epoch
+        ctx = self._context_text(msgs, target_m, JUDGE_TURNS)
+        with getattr(self, "_timeline_lock", threading.Lock()):
+            self._timeline_req = (epoch, text, ctx)
+            if not getattr(self, "_timeline_running", False):
+                self._timeline_running = True
+                threading.Thread(target=self._timeline_judge_loop, daemon=True).start()
+
+    @objc.python_method
+    def _timeline_judge_loop(self):
+        """时间线异步研判循环：latest-wins 槽位机制，自动补跑新消息，且具备严格的 epoch 守卫。"""
+        while True:
+            with self._timeline_lock:
+                req = self._timeline_req
+                self._timeline_req = None
+                if req is None:
+                    self._timeline_running = False
+                    break
+            epoch, text, ctx = req
+            if epoch != self._reply_epoch or self._paused:
+                continue
+            try:
+                res = self.judge.multi_judge(text, context=ctx)
+            except Exception as e:
+                res = {"error": str(e), "message": text}
+            if epoch == self._reply_epoch and not self._paused:
+                self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "applyJudgmentResult:", (epoch, text, res), False
+                )
 
     def applyJudgmentResult_(self, payload):
-        text, res = payload
+        if len(payload) == 3:
+            epoch, text, res = payload
+            if epoch != self._reply_epoch:
+                return  # 跨会话或旧轮次过期结果，安全丢弃
+        else:
+            text, res = payload
         self._chat_judgments[text] = res
         self._render_timeline()
 
@@ -1658,7 +1694,9 @@ class HudController(NSObject):
                 # Judgment already ran inside the settle window; verdict is directly shown on screen
                 _log(f"停稳 · 用预判结论上屏 · 这条消息出现到现在 {now - self.last_change_ts:.1f}s")
                 self._push("applyJudgment:", (pr[1], pr[2], pr[3]))
-                self._analyzing = False
+                threading.Thread(target=self._reply_task,
+                                 args=(self._reply_epoch, self._run_generation,
+                                       newest, msgs, pr[1]), daemon=True).start()
             else:
                 _log(f"开始分析 · 这条消息出现到现在 {now - self.last_change_ts:.1f}s")
                 self._push("applyPending:", (newest.text, newest.sender, prev_text))
@@ -1817,9 +1855,38 @@ class HudController(NSObject):
 
     @objc.python_method
     def _run_generation(self, newest, msgs, verdict: dict):
-        """No-op when candidate generation is disabled."""
-        self._analyzing = False
-        return
+        """The pre-judged path's second half: collect generation + rank, judgment shown."""
+        t0 = time.perf_counter()
+        try:
+            if not self._reply_current():
+                return
+            context = self._context_text(msgs, newest)
+            strat = ""
+            risk_w = ""
+            if verdict:
+                strat_obj = verdict.get("strategy")
+                strat = strat_obj.get("choice", "") if isinstance(strat_obj, dict) else str(strat_obj or "")
+                risk_obj = verdict.get("risk")
+                if isinstance(risk_obj, dict):
+                    risk_w = risk_obj.get("warning") or (risk_obj.get("category") if risk_obj.get("has_risk") else "")
+                else:
+                    risk_w = str(risk_obj or "")
+            gen, wait_ms = self._take_pregen(newest.text, tuple(self.slot_tones))
+            if not self._reply_current():
+                return
+            note = f"（早跑命中，停稳后仅等 {wait_ms:.0f}ms）" if gen is not None else ""
+            if gen is None:
+                gen = self.generator.generate(
+                    newest.text, verdict.get("intent", ""), list(self.slot_tones),
+                    context, self._stream_hook(t0),
+                    strategy=strat, risk_warning=risk_w
+                )
+            self._finish_generate(gen, newest, t0, verdict, note)
+        except Exception as e:
+            _log(f"生成失败 {type(e).__name__}: {str(e)[:60]}")
+            self._push("applyError:", f"候选生成失败: {type(e).__name__}: {str(e)[:40]}")
+        finally:
+            self._analyzing = False
 
     @objc.python_method
     def _context_text(self, msgs, newest, turns: int = JUDGE_TURNS) -> str | None:
@@ -1852,8 +1919,9 @@ class HudController(NSObject):
 
     @objc.python_method
     def _analyze(self, newest, msgs, prev_text: str = ""):
-        """Judge message intent and risk via TypeSafe Jev. No candidate generation."""
+        """Judge message intent and risk via unified Judge. Generate candidates in parallel."""
         t0 = time.perf_counter()
+        context = self._context_text(msgs, newest)
         verdict = None
         t_judge = time.perf_counter()
         try:
@@ -1871,9 +1939,41 @@ class HudController(NSObject):
         except (LowMemoryError, ModelNotDownloadedError) as e:
             _log(f"判断被拒 {type(e).__name__}: {str(e)[:60]}")
             self._push("applyError:", str(e))
+            return
         except Exception as e:
             _log(f"判断失败 {type(e).__name__}: {str(e)[:60]}")
             self._push("applyError:", f"判断失败: {type(e).__name__}: {str(e)[:40]}")
+            return
+
+        if not self._reply_current():
+            return
+
+        strat = ""
+        risk_w = ""
+        if verdict:
+            strat_obj = verdict.get("strategy")
+            strat = strat_obj.get("choice", "") if isinstance(strat_obj, dict) else str(strat_obj or "")
+            risk_obj = verdict.get("risk")
+            if isinstance(risk_obj, dict):
+                risk_w = risk_obj.get("warning") or (risk_obj.get("category") if risk_obj.get("has_risk") else "")
+            else:
+                risk_w = str(risk_obj or "")
+
+        try:
+            tones = tuple(self.slot_tones)
+            gen, _waited = self._take_pregen(newest.text, tones)
+            if not self._reply_current():
+                return
+            if gen is None:
+                gen = self.generator.generate(
+                    newest.text, verdict.get("intent", ""), list(tones),
+                    context, self._stream_hook(t0),
+                    strategy=strat, risk_warning=risk_w
+                )
+            self._finish_generate(gen, newest, t0, verdict)
+        except Exception as e:
+            _log(f"生成失败 {type(e).__name__}: {str(e)[:60]}")
+            self._push("applyError:", f"候选生成失败: {type(e).__name__}: {str(e)[:40]}")
 
     @objc.python_method
     def _finish_generate(self, gen: dict, newest, t0: float, verdict: dict | None,
@@ -2053,6 +2153,11 @@ class HudController(NSObject):
         # kept so a 话术 change can re-rank the new candidates against the same verdict
         self._last_intent = v.get("intent", "")
         self._last_risk = v.get("risk", 0)   # and so the overlay can badge the message
+        self._last_verdict = v
+        msg_text = v.get("message")
+        if msg_text:
+            self._chat_judgments[msg_text] = v
+            self._render_timeline()
         self._render("message", v["message"], PALETTE["text"])
         self._render("sender", self._context_line(sender, prev), PALETTE["muted"])
         backend = v.get("backend", "")
@@ -2176,8 +2281,13 @@ class HudController(NSObject):
         return True
 
     def applyForegroundHidden_(self, reason):
-        """Update status line without wiping previous candidates and message info."""
+        """微信离开前台时，清空敏感聊天内容与卡片，并隐藏悬浮窗保护隐私。"""
+        self._chat_messages = []
+        self._render_timeline()
         self.applyHidden_(reason)
+        # 保护隐私：微信切出前台时面板退到后台，绝不将私人聊天残留在用户屏幕上
+        if not getattr(self.judge, "load_status", None) and hasattr(self, "panel") and self.panel.isVisible():
+            self.panel.orderOut_(None)
 
     def applyPosition_(self, win):
         is_ocr_mock = hasattr(globals().get("read_conversation"), "assert_called_with")

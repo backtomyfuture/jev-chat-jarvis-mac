@@ -127,6 +127,35 @@ class TimelineTests(unittest.TestCase):
         self.assertIn(msg_text, self.hud._chat_judgments)
         self.assertEqual(self.hud._chat_judgments[msg_text]["danger"]["score"], 6)
 
+    def test_timeline_epoch_guard_discards_stale_result(self):
+        """测试时间线异步结果必须有 epoch 守卫：旧会话的过期结果绝对不能写进新会话。"""
+        self.hud._reply_epoch = 5
+        old_epoch = 4
+        old_text = "这是上一位联系人的私密消息"
+        stale_res = {"appeal": {"choice": "派活待办"}, "strategy": {"choice": "确认范围"}}
+        
+        # 带有旧 epoch 的结果被送入
+        self.hud.applyJudgmentResult_((old_epoch, old_text, stale_res))
+        
+        # 必须被安全拦截丢弃，不得写入 _chat_judgments
+        self.assertNotIn(old_text, self.hud._chat_judgments)
+
+        # 带有当前匹配 epoch 的结果可以正常写入
+        curr_text = "这是当前会话的消息"
+        curr_res = {"appeal": {"choice": "核对确认"}, "strategy": {"choice": "顺势承接"}}
+        self.hud.applyJudgmentResult_((5, curr_text, curr_res))
+        self.assertIn(curr_text, self.hud._chat_judgments)
+
+    def test_foreground_hidden_clears_timeline_for_privacy(self):
+        """测试微信离开前台时，清空时间线敏感气泡以保护聊天隐私。"""
+        msgs = [Message(text="保密合同明天签署", side="them", sender="客户", x=0.1, y=0.1, w=0.3, h=0.03, conf=0.98)]
+        self.hud.applyTimelineMessages_(msgs)
+        self.assertEqual(len(self.hud._chat_messages), 1)
+
+        # 微信离开前台
+        self.hud.applyForegroundHidden_("微信不在前台")
+        self.assertEqual(len(self.hud._chat_messages), 0)
+
 
 if __name__ == '__main__':
     unittest.main()

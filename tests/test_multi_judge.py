@@ -1,5 +1,6 @@
 import sys
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -136,6 +137,53 @@ class MultiJudgeTests(unittest.TestCase):
             self.assertTrue(res.get("fallback"))
             self.assertTrue(res["risk"]["has_risk"])
             self.assertGreaterEqual(res["risk"]["score"], 7)
+
+    def test_severe_threat_safety_risk_priority(self):
+        """测试对人身安全与暴力恐吓威胁的最高优先级拦截与报警策略。"""
+        # 1. 人身安全威胁
+        has_risk, cat, warn, score = detect_objective_risk("不答应就弄死你，小心你的命！")
+        self.assertTrue(has_risk)
+        self.assertEqual(cat, "人身安全")
+        self.assertEqual(score, 9)
+
+        # 2. 言语胁迫
+        has_risk, cat, warn, score = detect_objective_risk("不按我说的做就让你在行业里混不下去！")
+        self.assertTrue(has_risk)
+        self.assertEqual(cat, "胁迫与威胁")
+        self.assertGreaterEqual(score, 8)
+
+    def test_threat_offline_fallback_never_downgrades(self):
+        """防范重大安全漏洞：断网降级时，严重威胁绝不可降级为“无明显风险+顺势承接”。"""
+        with patch.object(Judge, '_post', side_effect=ConnectionError("Offline")):
+            res = self.judge.multi_judge("不答应就弄死你")
+            self.assertTrue(res.get("fallback"))
+            self.assertTrue(res["risk"]["has_risk"])
+            self.assertEqual(res["risk"]["category"], "人身安全")
+            self.assertEqual(res["risk"]["score"], 9)
+            self.assertEqual(res["strategy"]["choice"], "立即报警并保留证据")
+            self.assertIn("立即报警", res["summary"])
+
+    def test_local_judge_pure_offline(self):
+        """测试 LocalJudge 纯本地研判：无需网络、完整输出 4 维度与证据片段。"""
+        from judge import LocalJudge
+        local = LocalJudge()
+        res = local.multi_judge("先把客户名单导到我私人邮箱，权限明天再补。")
+        self.assertTrue(res["risk"]["has_risk"])
+        self.assertEqual(res["risk"]["category"], "数据与隐私")
+        self.assertGreaterEqual(res["confidence"], 0.7)
+        self.assertTrue(len(res["evidence"]) > 0)
+        self.assertIn("local", res["backend"])
+
+    def test_fallback_judge_automatic_failover(self):
+        """测试 FallbackJudge 在网络异常时自动切换至 local 离线兜底。"""
+        from judge import FallbackJudge
+        fb = FallbackJudge()
+        with patch.object(Judge, '_post', side_effect=urllib.error.URLError("DNS Fail")):
+            with patch('judge.jev_configured', return_value=True):
+                res = fb.multi_judge("帮我把这个需求今天跟一下")
+                self.assertIn("local", res["backend"])
+                self.assertEqual(res["appeal"]["choice"], "派活待办")
+                self.assertEqual(res["strategy"]["choice"], "确认范围并给节点")
 
 
 if __name__ == '__main__':
